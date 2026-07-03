@@ -612,6 +612,58 @@ pub fn gridDim_z() -> u32 {
 }
 
 // =============================================================================
+// SM and Grid Identification
+// =============================================================================
+
+/// Sample the current SM (streaming multiprocessor) identifier.
+///
+/// Returns the `%smid` special register: the SM on which this thread is
+/// executing at the moment of the read. The value may change if the thread is
+/// rescheduled after preemption, so use this for profiling and diagnostics,
+/// not as a stable work-partitioning key.
+///
+/// Values are below [`nsmid()`], but SM identifiers need not be contiguous.
+///
+/// # PTX
+///
+/// `mov.u32 %r, %smid;`
+#[inline(never)]
+pub fn smid() -> u32 {
+    // Lowered to: call i32 @llvm.nvvm.read.ptx.sreg.smid()
+    unreachable!("smid called outside CUDA kernel context")
+}
+
+/// Read the maximum SM ID + 1 (number of SM slots).
+///
+/// Returns the `%nsmid` special register. Note that SM IDs may not be
+/// contiguous, so this is the upper bound, not the count of active SMs.
+///
+/// # PTX
+///
+/// `mov.u32 %r, %nsmid;`
+#[inline(never)]
+pub fn nsmid() -> u32 {
+    // Lowered to: call i32 @llvm.nvvm.read.ptx.sreg.nsmid()
+    unreachable!("nsmid called outside CUDA kernel context")
+}
+
+/// Read the grid's temporal launch identifier.
+///
+/// Returns the full 64-bit `%gridid` special register. CUDA debuggers use this
+/// per-grid value to distinguish CTAs and clusters in concurrently executing
+/// grids and across repeated launches.
+///
+/// # PTX
+///
+/// `mov.u64 %rd, %gridid;`
+#[inline(never)]
+pub fn gridid() -> u64 {
+    // Lowered to exact inline PTX because LLVM's intrinsic exposes only the
+    // legacy low-32-bit form.
+    unreachable!("gridid called outside CUDA kernel context")
+}
+
+// =============================================================================
 // Synchronization Intrinsics
 // =============================================================================
 
@@ -704,5 +756,65 @@ pub fn sync_threads() {
 pub fn __launch_bounds_config<const MAX_THREADS: u32, const MIN_BLOCKS: u32>() {
     // This function is detected at compile time and removed.
     // The const generics are extracted to set launch bounds.
+    // No runtime code is generated.
+}
+
+/// Compile-time loop-unroll request marker (internal, do not call directly).
+///
+/// The `#[kernel]` and `#[device]` macros insert this marker at the start of an
+/// annotated loop body. The MIR importer turns it into a `mir.unroll_hint`
+/// operation, and the loop-unroll pass consumes that hint before lowering. It
+/// generates no runtime code.
+///
+/// # Usage
+///
+/// Put the annotation directly on the loop. Bare `#[unroll]` requests full
+/// unrolling; `#[unroll(N)]` requests `N` copies per trip:
+///
+/// ```rust,ignore
+/// #[kernel]
+/// pub fn my_kernel(mut output: DisjointSlice<u32>, n: u32) {
+///     let tid = thread::index_1d();
+///     if let Some(out_elem) = output.get_mut(tid) {
+///         let mut sum = 0;
+///         let mut i = 0;
+///         #[unroll]
+///         while i < 4 {
+///             sum += i;
+///             i += 1;
+///         }
+///         *out_elem = sum;
+///     }
+///
+///     let mut i = 0;
+///     #[unroll(4)]
+///     while i < n {
+///         i += 1;
+///     }
+/// }
+/// ```
+///
+/// The pass currently recognizes explicit counted `while` loops. Range-based
+/// `for` loops are not yet recognized.
+///
+/// Loops with several `continue` paths are supported. Full `#[unroll]` also
+/// preserves `break` paths and multiple exit targets. Partial `#[unroll(N)]`
+/// requires a positive counter step, a `<` or `<=` test, an unchanging limit,
+/// and no exit besides the normal header test. Unsupported requests warn and
+/// are not unrolled.
+///
+/// One annotation may create at most 1,024 body copies, 8,192 cloned basic
+/// blocks, and 65,536 cloned operations. Larger requests warn and are not
+/// unrolled.
+///
+/// # Parameters
+///
+/// - `FACTOR = 0` requests full unrolling of this loop and requires a
+///   compile-time-known trip count.
+/// - `FACTOR >= 2` requests partial unrolling of this loop by that factor.
+#[inline(never)]
+pub fn __unroll_config<const FACTOR: u32>() {
+    // This function is detected at compile time and removed.
+    // The const generic FACTOR is extracted to set the loop-unroll request.
     // No runtime code is generated.
 }

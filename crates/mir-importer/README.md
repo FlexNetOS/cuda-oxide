@@ -4,8 +4,9 @@ Rust MIR to `dialect-mir` translator and compilation pipeline for cuda-oxide.
 
 Translates rustc's Stable MIR into [`dialect-mir`](../dialect-mir/) (a pliron
 dialect, MLIR-like) using the alloca + load/store model, then orchestrates the
-rest of the pipeline through `mem2reg`, lowering to the LLVM dialect (provided
-by `pliron-llvm`), LLVM IR export, and PTX generation via `llc`.
+rest of the pipeline through `mem2reg`, annotated loop unrolling, lowering to
+the LLVM dialect (provided by `pliron-llvm`), LLVM IR export, and PTX generation
+via `llc`.
 
 ## Architecture
 
@@ -17,8 +18,8 @@ by `pliron-llvm`), LLVM IR export, and PTX generation via `llc`.
 │  ┌─────────────────┐    ┌─────────────────────┐    ┌─────────────────┐  │
 │  │   translator    │───▶│       pipeline      │───▶│    export +     │  │
 │  │                 │    │                     │    │      llc        │  │
-│  │  MIR →          │    │ mem2reg + lower to  │    │  LLVM IR → PTX  │  │
-│  │  dialect-mir    │    │     LLVM dialect    │    │                 │  │
+│  │  MIR →          │    │  mem2reg + unroll   │    │  LLVM IR → PTX  │  │
+│  │  dialect-mir    │    │   + LLVM lowering   │    │                 │  │
 │  │     (alloca)    │    │   (via mir-lower)   │    │                 │  │
 │  └─────────────────┘    └─────────────────────┘    └─────────────────┘  │
 │                                                                         │
@@ -28,12 +29,11 @@ by `pliron-llvm`), LLVM IR export, and PTX generation via `llc`.
 ## Pipeline Steps
 
 ```text
-┌────────────┐  ┌────────────┐  ┌───────────┐  ┌─────────────────┐  ┌────────────┐
-│ 1. Trans-  │─▶│ 2. Verify  │─▶│ 3. mem2reg│─▶│ 4. Lower        │─▶│ 5. Export  │
-│   late to  │  │ dialect-mir│  │   (slots  │  │  dialect-mir →  │  │  LLVM IR   │
-│ dialect-mir│  │            │  │    → SSA) │  │   LLVM dialect  │  │ → PTX (llc)│
-└────────────┘  └────────────┘  └───────────┘  └─────────────────┘  └────────────┘
+translate → verify → mem2reg → annotated unroll → lower/export → optimize → PTX
 ```
+
+Full variable-debug builds skip `mem2reg` and annotated unrolling so source
+variables remain in stable memory locations for cuda-gdb.
 
 1. **Translate** — Convert Stable MIR into `dialect-mir` using the alloca +
    load/store model (one `mir.alloca` per non-ZST local).
@@ -42,16 +42,25 @@ by `pliron-llvm`), LLVM IR export, and PTX generation via `llc`.
 3. **mem2reg** — Promote scalar alloca slots back to SSA via
    `pliron::opts::mem2reg`, eliminating the load/store traffic the translator
    produced.
-4. **Lower** — Convert `dialect-mir` → LLVM dialect (via `mir-lower`). Float
-   ops carry the `contract` fast-math flag so the NVPTX backend can fuse
-   `fmul+fadd` into `fma.rn.f32` (matching nvcc's `--fmad=true`).
-5. **Optimize** — Run `opt -O2` (via `LlvmToolchain`) on the exported IR.
+4. **Unroll** — Apply supported `#[unroll]` and `#[unroll(N)]` requests to the
+   SSA form.
+5. **Lower and export** — Convert `dialect-mir` → LLVM dialect (via `mir-lower`)
+   and export LLVM IR. By default, ordinary float operations carry the
+   `contract` fast-math flag so NVPTX can fuse `fmul+fadd` into `fma.rn.f32`
+   (matching nvcc's `--fmad=true`). `--no-fmad` omits that permission.
+6. **Optimize** — Run `opt -O2` (via `LlvmToolchain`) on the exported IR.
    Skipped for full-debug builds (`-G`) so locals stay inspectable under
    cuda-gdb. Override with `CUDA_OXIDE_NO_OPT=1`.
-6. **Generate** — Invoke `llc -fp-contract=fast` for PTX (or emit NVVM IR).
+7. **Generate** — Invoke `llc -fp-contract=fast` for PTX (or emit NVVM IR).
    The `-fp-contract=fast` flag activates the NVPTX backend's FMA contract
-   mode; pair with the IR `contract` flag from step 4. Disable with
-   `CUDA_OXIDE_NO_FMA=1` or `cargo oxide run --no-fmad`.
+   mode; pair with the IR `contract` flag from step 5. Disable both gates with
+   `CUDA_OXIDE_NO_FMA=1` or `cargo oxide run --no-fmad`. Explicit fused
+   operations such as `f32::mul_add` remain fused.
+
+NVVM IR and LTOIR defer final code generation. Their versioned `.target` file
+requires the sibling `.options` file, which tells cuda-host, libNVVM, and
+nvJitLink whether to use `-fma=0` or `-fma=1`. Copy both sidecars with the
+artifact; a missing required sidecar is an error rather than a silent fallback.
 
 ## Output Modes
 
@@ -94,9 +103,9 @@ by `pliron-llvm`), LLVM IR export, and PTX generation via `llc`.
 ### `pipeline.rs` — Compilation Orchestration
 
 Drives the end-to-end flow: register dialects → translate functions →
-verify `dialect-mir` → run `mem2reg` → lower to the LLVM dialect → add
-device extern declarations → verify the LLVM dialect → export LLVM IR →
-run `llc` for PTX.
+verify `dialect-mir` → run `mem2reg` → unroll annotated loops → lower to the
+LLVM dialect → add device extern declarations → verify the LLVM dialect →
+export LLVM IR → run `llc` for PTX.
 
 ## Alloca + load/store model
 

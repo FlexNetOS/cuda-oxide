@@ -28,8 +28,10 @@
 //! - [`embedded`]: Load `#[cuda_module]` artifact bundles embedded in the host
 //!   binary (PTX, cubin, NVVM IR, LTOIR)
 //! - [`launch`]: Kernel launch traits (`CudaKernel`, `GenericCudaKernel`)
+//! - [`kernel_family`]: Bounded variant menus with validated selection,
+//!   overrides, and cache provenance
 //! - [`ltoir`]: libNVVM + nvJitLink wrappers (`load_kernel_module`, in-memory
-//!   `build_cubin_from_nvvm_ir`, `link_ltoir_to_cubin`)
+//!   cubin builders, and pre-Blackwell PTX compatibility)
 //! - [`tiling`]: Layout transformations for tensor core operations (tcgen05)
 //!
 //! ## Macros
@@ -79,17 +81,26 @@
 //! ```
 
 pub mod embedded;
+pub mod kernel_family;
 pub mod launch;
 pub mod ltoir;
+mod ltoir_cache;
 pub mod tiling;
 pub mod type_id;
 
+pub use kernel_family::{
+    KernelFamily, KernelFamilyBuildError, KernelFamilyId, KernelProblem, KernelSelectionCache,
+    KernelSelectionError, KernelSelectionResult, KernelSelector, KernelVariant,
+    NoKernelSelectionCache, SelectedVariant, SelectionMode, SelectionSource,
+};
 pub use launch::{
     CudaKernel, GenericCudaKernel, HasLength, KernelScalar, ReadOnly, Scalar, WriteOnly,
     push_kernel_device_slice, push_kernel_scalar, read_only_device_buffer_arg,
     writable_device_buffer_arg,
 };
-pub use type_id::type_id_u128;
+#[doc(hidden)]
+pub use type_id::__intern_generic_kernel_name;
+pub use type_id::{type_id_u128, type_id_u128_of_val};
 
 #[cfg(feature = "async")]
 pub use launch::{
@@ -108,12 +119,13 @@ pub use embedded::{
     EmbeddedModuleError, load_all_ptx_bundles_merged, load_embedded_module,
     load_first_embedded_module,
 };
-/// Loads a compiled kernel module by name. Tries `<name>.cubin`, then
-/// `<name>.ptx`, and finally falls through to the LTOIR build path
-/// (`<name>.ll` plus libdevice → cubin) when cuda-oxide auto-detected
-/// CUDA libdevice math intrinsics during the build. Most beginner code
-/// never sees the LTOIR path because `vecadd`-style kernels emit `.ptx`
-/// directly. See [`ltoir`] for the underlying pipeline and discovery rules.
+/// Loads a compiled kernel module by name. It prefers PTX, then
+/// handles NVVM IR (`<name>.ll`) or an existing `<name>.ltoir`, and finally a
+/// standalone cubin. NVVM inputs become a same-target cubin, except that an
+/// artifact built for a standard pre-Blackwell target, such as `sm_86`, may be
+/// converted to PTX and JIT-compiled by the driver on Blackwell. Most kernels
+/// emit PTX directly. See [`ltoir`] for the complete lookup and compatibility
+/// rules.
 pub use ltoir::{LtoirError, load_kernel_module};
 
 // Re-export launch macros from cuda-macros for convenience.

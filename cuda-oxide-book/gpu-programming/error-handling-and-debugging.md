@@ -197,7 +197,7 @@ the variable may honestly print as `<optimized out>` because it has not been
 loaded into a register yet. For variable checks, prefer a source line after the
 value is used:
 
-```gdb
+```text
 break src/main.rs:412
 run
 info args
@@ -258,6 +258,7 @@ and describe it with `llvm.dbg.declare`, the way every debug build does
 So `CUDA_OXIDE_DEBUG=full` is a `-G`-style build. It automatically:
 
 - keeps every source local in its stack slot (skips Pliron `mem2reg`),
+- skips annotated loop unrolling, which requires `mem2reg`'s SSA form,
 - skips LLVM `opt -O2`, and
 - runs `llc` at `-O0`,
 
@@ -319,6 +320,55 @@ inspect the GPU state.
 `debug::breakpoint()` will **crash** the kernel if no debugger is attached.
 Guard it with a compile-time flag or only use it during debugging sessions.
 :::
+
+## `cargo oxide sanitize` -- Compute Sanitizer
+
+For memory and synchronization correctness checks, run the same build path under
+NVIDIA Compute Sanitizer:
+
+```bash
+cargo oxide sanitize vecadd
+cargo oxide sanitize sharedmem --tool racecheck
+cargo oxide sanitize debug --tool synccheck -- --kernel-name kns=clock
+cargo oxide sanitize my_app -- --leak-check full -- --app-flag value
+```
+
+`memcheck` is the default tool. Use `racecheck` for shared-memory hazards,
+`initcheck` for uninitialized global-memory reads, and `synccheck` for invalid
+synchronization usage. Extra arguments after `--` are passed directly to
+`compute-sanitizer` before the executable; use a second `--` to pass arguments
+to the target program after the executable.
+
+The command enables optimized device line tables by default so findings can
+name Rust source files and lines. An explicit `CUDA_OXIDE_DEBUG` process or
+project setting still wins.
+
+Compute Sanitizer normally exits with status zero even when it reports a tool
+finding. `cargo oxide sanitize` therefore supplies `--error-exitcode 86` by
+default, making findings fail scripts and CI. An explicit sanitizer argument
+overrides that default:
+
+```bash
+# Intentionally keep a zero exit status and inspect the printed report.
+cargo oxide sanitize vecadd -- --error-exitcode 0
+```
+
+Options such as `--check-exit-code no` and `--require-cuda-init no` weaken what
+a zero status proves. The wrapper therefore never declares the report clean
+from process status alone; it reports completion and leaves the sanitizer
+output visible for inspection.
+
+The `--no-fmad` CLI flag is forwarded through both ordinary and interop builds.
+It keeps ordinary multiply and add/subtract operations separate, with one
+rounding per operation. Explicit fused operations such as `f32::mul_add`
+remain fused.
+
+NVVM IR and LTOIR builds also produce `.options` and versioned `.target`
+sidecars. Keep both files with the artifact so later libNVVM and nvJitLink
+steps preserve the same FMA policy.
+
+Run `memcheck` first when investigating memory safety. The other tools are
+complementary and do not perform full memory-access checking.
 
 ## `cargo oxide doctor` -- environment validation
 
